@@ -4,52 +4,75 @@ const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcrypt");
 const session = require("express-session");
+const pgSession = require("connect-pg-simple")(session);
 const axios = require("axios");
 const { Pool } = require("pg");
 
 const app = express();
 
-// 1. CORS Configuration
-app.use(
-  cors({
-    origin: ["http://localhost:5173", "http://localhost:3000", "https://achudhaloans.in"], // Added port 3000 as fallback
-    credentials: true,
-  })
-);
+// Trust reverse proxy header (Nginx, Render, Heroku, etc.)
+app.set("trust proxy", 1);
 
-app.use(express.json());
-
-// 2. Express Session Configuration
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET || "achudha_matrimony_secret_key",
-    resave: false,
-    saveUninitialized: true,
-    cookie: {
-      secure: false, // Set to true for HTTPS in production
-      httpOnly: true,
-      maxAge: 10 * 60 * 1000, // Session expires in 10 minutes
-    },
-  })
-);
-
-// 3. PostgreSQL Database Connection
+// 1. PostgreSQL Database Connection
 const pool = new Pool({
   host: process.env.DB_HOST,
   port: process.env.DB_PORT,
   database: process.env.DB_NAME,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false,
 });
+
+// 2. CORS Configuration
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "https://achudhaloans.in",
+  "https://www.achudhamatrimony.in",
+];
+
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+    credentials: true, // Crucial for passing session cookies cross-origin
+  })
+);
+
+app.use(express.json());
+
+// 3. Persistent Express Session Configuration (PostgreSQL Store)
+const isProduction = process.env.NODE_ENV === "production";
+
+app.use(
+  session({
+    store: new pgSession({
+      pool: pool,
+      tableName: "session", // Automatically creates "session" table if it doesn't exist
+      createTableIfMissing: true,
+    }),
+    secret: process.env.SESSION_SECRET || "achudha_matrimony_secret_key",
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      secure: isProduction, // Set to true if running under HTTPS in production
+      httpOnly: true,
+      sameSite: isProduction ? "none" : "lax", // Allows cross-site cookie transmission
+      maxAge: 10 * 60 * 1000, // 10 minutes session duration
+    },
+  })
+);
 
 // 4. SMS Provider Credentials & Templates
 const SMS_CONFIG = {
-  apiKey: "38ac76424a4e4d6ab6daf3d7e0c85d5a",
-  senderId: "AHDAET",
-  templateId: "1007990358521328635",
+  apiKey: process.env.SMS_API_KEY || "38ac76424a4e4d6ab6daf3d7e0c85d5a",
+  senderId: process.env.SMS_SENDER_ID || "AHDAET",
+  templateId: process.env.SMS_TEMPLATE_ID || "1007990358521328635",
   link1: "Dear User Your Achudha Matrimony OTP is",
   link2: "Please use this OTP to verify your account on www.achudhamatrimony.in",
 };
@@ -99,7 +122,7 @@ app.post("/send-otp", async (req, res) => {
     }
 
     const checkUser = await pool.query(
-      "SELECT * FROM users WHERE email=$1 OR mobile=$2",
+      "SELECT id FROM users WHERE email=$1 OR mobile=$2",
       [email, mobile]
     );
 
@@ -154,7 +177,7 @@ app.post("/register", async (req, res) => {
       });
     }
 
-    if (req.session.otp !== otp) {
+    if (req.session.otp !== otp.toString()) {
       return res.status(400).json({
         message: "Invalid OTP. Please try again.",
       });
@@ -172,7 +195,7 @@ app.post("/register", async (req, res) => {
     delete req.session.tempUser;
 
     req.session.save((err) => {
-      if (err) console.error("Session Clear Error:", err);
+      if (err) console.error("Session Save Error:", err);
 
       res.json({
         message: "Registration Successful!",
@@ -208,8 +231,12 @@ app.post("/login", async (req, res) => {
     }
 
     req.session.isAuthenticated = true;
+    req.session.userId = user.id;
 
-    res.json({ message: "Login Successful" });
+    req.session.save((err) => {
+      if (err) console.error("Session Save Error:", err);
+      res.json({ message: "Login Successful" });
+    });
   } catch (error) {
     console.error("Login Error:", error);
     res.status(500).json({ message: "Server Error" });
@@ -217,7 +244,7 @@ app.post("/login", async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// NEW Route 4: Check if Mobile Number is Registered (Live Check)
+// Route 4: Check if Mobile Number is Registered (Live Check)
 // -------------------------------------------------------------
 app.post("/check-mobile", async (req, res) => {
   try {
@@ -241,7 +268,7 @@ app.post("/check-mobile", async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// NEW Route 5: Send OTP for Login
+// Route 5: Send OTP for Login
 // -------------------------------------------------------------
 app.post("/send-otp-login", async (req, res) => {
   try {
@@ -253,18 +280,15 @@ app.post("/send-otp-login", async (req, res) => {
 
     const cleanMobile = mobile.replace(/\D/g, "");
 
-    // Double check registration status
-    const result = await pool.query("SELECT * FROM users WHERE mobile=$1", [cleanMobile]);
+    const result = await pool.query("SELECT id FROM users WHERE mobile=$1", [cleanMobile]);
     if (result.rows.length === 0) {
       return res.status(400).json({ message: "Mobile number is not registered." });
     }
 
     const generatedOtp = Math.floor(100000 + Math.random() * 900000).toString();
 
-    // Trigger SMS API
     await sendSmsNotification(cleanMobile, generatedOtp);
 
-    // Save session variables for login OTP
     req.session.loginOtp = generatedOtp;
     req.session.loginMobile = cleanMobile;
 
@@ -283,7 +307,7 @@ app.post("/send-otp-login", async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// NEW Route 6: Verify Login OTP
+// Route 6: Verify Login OTP
 // -------------------------------------------------------------
 app.post("/verify-otp-login", async (req, res) => {
   try {
@@ -295,16 +319,14 @@ app.post("/verify-otp-login", async (req, res) => {
       });
     }
 
-    if (req.session.loginOtp !== otp) {
+    if (req.session.loginOtp !== otp.toString()) {
       return res.status(400).json({
         message: "Invalid OTP. Please try again.",
       });
     }
 
-    // Login successful — authenticated status saved
     req.session.isAuthenticated = true;
 
-    // Clear temp login OTP data from session
     delete req.session.loginOtp;
     delete req.session.loginMobile;
 
