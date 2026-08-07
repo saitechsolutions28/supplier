@@ -12,7 +12,7 @@ const app = express();
 // 1. CORS Configuration
 app.use(
   cors({
-    origin: ["http://localhost:5173", "http://localhost:3000", "https://achudhaloans.in", "https://supplier-8aue.onrender.com/"], // Added port 3000 as fallback
+    origin: ["http://localhost:5173", "http://localhost:3000", "https://achudhaloans.in"], // Added port 3000 as fallback
     credentials: true,
   })
 );
