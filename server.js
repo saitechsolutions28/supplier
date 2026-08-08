@@ -9,42 +9,55 @@ const { Pool } = require("pg");
 
 const app = express();
 
-const isProduction = process.env.NODE_ENV === "production";
+const isProduction = process.env.NODE_ENV === "production" || process.env.RENDER === "true";
 
-// Enable proxy trust for HTTPS hosting (Render, Vercel, Heroku, Nginx)
+// 1. Crucial for Render / Reverse Proxies (enables secure cookies over HTTPS)
 if (isProduction) {
   app.set("trust proxy", 1);
 }
 
-// 1. Universal CORS (Works on Localhost + Production automatically)
+// 2. CORS Configuration for Localhost & Production
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "https://achudhaloans.in",
+  "https://www.achudhaloans.in",
+];
+
 app.use(
   cors({
     origin: function (origin, callback) {
-      // Allows requests from any origin (localhost or production domain) with credentials
-      return callback(null, true);
+      // Allow requests with no origin (e.g. Postman, mobile apps)
+      if (!origin) return callback(null, true);
+      
+      if (allowedOrigins.indexOf(origin) !== -1 || !isProduction) {
+        return callback(null, true);
+      } else {
+        return callback(null, true); // Fallback to allow requests with credentials
+      }
     },
-    credentials: true,
+    credentials: true, // Enables passing express-session cookie
   })
 );
 
 app.use(express.json());
 
-// 2. Smart Express Session Configuration
+// 3. Express Session Configuration (Fixed for Cross-Domain Cookies)
 app.use(
   session({
     secret: process.env.SESSION_SECRET || "achudha_matrimony_secret_key_123",
     resave: false,
-    saveUninitialized: false, // Prevents creating empty sessions
+    saveUninitialized: false, // Don't create empty session objects
     cookie: {
-      secure: isProduction, // false on HTTP (localhost), true on HTTPS (Production)
-      sameSite: isProduction ? "none" : "lax", // 'none' allows cross-site cookies on HTTPS
+      secure: isProduction, // 'true' on Render (HTTPS), 'false' on localhost
+      sameSite: isProduction ? "none" : "lax", // 'none' allows cookies across achudhaloans.in and onrender.com
       httpOnly: true,
-      maxAge: 10 * 60 * 1000, // 10 minutes session life
+      maxAge: 10 * 60 * 1000, // 10 minutes session duration
     },
   })
 );
 
-// 3. PostgreSQL Database Connection
+// 4. PostgreSQL Database Connection
 const pool = new Pool({
   host: process.env.DB_HOST,
   port: process.env.DB_PORT,
@@ -54,7 +67,7 @@ const pool = new Pool({
   ssl: isProduction ? { rejectUnauthorized: false } : false,
 });
 
-// 4. SMS Provider Config
+// 5. SMS Provider Configuration
 const SMS_CONFIG = {
   apiKey: "38ac76424a4e4d6ab6daf3d7e0c85d5a",
   senderId: "AHDAET",
@@ -63,6 +76,7 @@ const SMS_CONFIG = {
   link2: "Please use this OTP to verify your account on www.achudhamatrimony.in",
 };
 
+// Helper function to trigger SMS API
 async function sendSmsNotification(cleanMobile, generatedOtp) {
   const smsMessage = `${SMS_CONFIG.link1} ${generatedOtp} ${SMS_CONFIG.link2}`;
   try {
@@ -74,20 +88,29 @@ async function sendSmsNotification(cleanMobile, generatedOtp) {
       serviceType: "otp",
     };
 
-    await axios.post("https://smsapi.edumarcsms.com/api/v1/sendsms", postData, {
-      headers: {
-        "Content-Type": "application/json",
-        apikey: SMS_CONFIG.apiKey,
-      },
-    });
+    const smsResponse = await axios.post(
+      "https://smsapi.edumarcsms.com/api/v1/sendsms",
+      postData,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          apikey: SMS_CONFIG.apiKey,
+        },
+      }
+    );
+
+    console.log("[SMS API SUCCESS]:", smsResponse.data);
   } catch (smsErr) {
-    console.error("[SMS ERROR]:", smsErr.response ? smsErr.response.data : smsErr.message);
+    console.error(
+      "[SMS API ERROR]:",
+      smsErr.response ? smsErr.response.data : smsErr.message
+    );
     console.log(`[LOCAL DEBUG] Mobile: ${cleanMobile} | OTP: ${generatedOtp}`);
   }
 }
 
 // -------------------------------------------------------------
-// Route 1: Register - Send OTP
+// Route 1: Register - Send OTP & Store Temp User in Session
 // -------------------------------------------------------------
 app.post("/send-otp", async (req, res) => {
   try {
@@ -103,7 +126,9 @@ app.post("/send-otp", async (req, res) => {
     );
 
     if (checkUser.rows.length > 0) {
-      return res.status(400).json({ message: "Email or mobile number already registered." });
+      return res.status(400).json({
+        message: "Email or mobile number already registered.",
+      });
     }
 
     const hashPassword = await bcrypt.hash(password, 10);
@@ -112,10 +137,15 @@ app.post("/send-otp", async (req, res) => {
 
     await sendSmsNotification(cleanMobile, generatedOtp);
 
-    req.session.tempUser = { name, email, mobile: cleanMobile, password: hashPassword };
+    req.session.tempUser = {
+      name,
+      email,
+      mobile: cleanMobile,
+      password: hashPassword,
+    };
     req.session.otp = generatedOtp;
 
-    // Save session explicitly before sending response
+    // Explicit session save before returning HTTP response
     req.session.save((err) => {
       if (err) {
         console.error("Session Save Error:", err);
@@ -130,7 +160,7 @@ app.post("/send-otp", async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// Route 2: Register - Verify OTP
+// Route 2: Register - Verify OTP & Insert User into Database
 // -------------------------------------------------------------
 app.post("/register", async (req, res) => {
   try {
@@ -143,7 +173,9 @@ app.post("/register", async (req, res) => {
     }
 
     if (req.session.otp !== otp) {
-      return res.status(400).json({ message: "Invalid OTP. Please try again." });
+      return res.status(400).json({
+        message: "Invalid OTP. Please try again.",
+      });
     }
 
     const { name, email, mobile, password } = req.session.tempUser;
@@ -158,7 +190,7 @@ app.post("/register", async (req, res) => {
     delete req.session.tempUser;
 
     req.session.save((err) => {
-      if (err) console.error("Session Save Error:", err);
+      if (err) console.error("Session Clear Error:", err);
       return res.json({ message: "Registration Successful!" });
     });
   } catch (error) {
@@ -168,7 +200,7 @@ app.post("/register", async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// Route 3: Check Mobile Registration
+// Route 3: Live Mobile Check API
 // -------------------------------------------------------------
 app.post("/check-mobile", async (req, res) => {
   try {
@@ -180,10 +212,11 @@ app.post("/check-mobile", async (req, res) => {
     const cleanMobile = mobile.replace(/\D/g, "");
     const result = await pool.query("SELECT id FROM users WHERE mobile=$1", [cleanMobile]);
 
-    return res.json({
-      isRegistered: result.rows.length > 0,
-      message: result.rows.length > 0 ? "Mobile number registered" : "Mobile number not registered",
-    });
+    if (result.rows.length > 0) {
+      return res.json({ isRegistered: true, message: "Mobile number registered" });
+    } else {
+      return res.json({ isRegistered: false, message: "Mobile number not registered" });
+    }
   } catch (error) {
     console.error("Check Mobile Error:", error);
     res.status(500).json({ isRegistered: false, message: "Server Error" });
@@ -191,21 +224,25 @@ app.post("/check-mobile", async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// Route 4: Send Login OTP
+// Route 4: Send OTP for Login
 // -------------------------------------------------------------
 app.post("/send-otp-login", async (req, res) => {
   try {
     const { mobile } = req.body;
-    if (!mobile) return res.status(400).json({ message: "Mobile number required" });
+
+    if (!mobile) {
+      return res.status(400).json({ message: "Mobile number is required" });
+    }
 
     const cleanMobile = mobile.replace(/\D/g, "");
-    const result = await pool.query("SELECT id FROM users WHERE mobile=$1", [cleanMobile]);
 
+    const result = await pool.query("SELECT id FROM users WHERE mobile=$1", [cleanMobile]);
     if (result.rows.length === 0) {
       return res.status(400).json({ message: "Mobile number is not registered." });
     }
 
     const generatedOtp = Math.floor(100000 + Math.random() * 900000).toString();
+
     await sendSmsNotification(cleanMobile, generatedOtp);
 
     req.session.loginOtp = generatedOtp;
@@ -238,7 +275,9 @@ app.post("/verify-otp-login", async (req, res) => {
     }
 
     if (req.session.loginOtp !== otp) {
-      return res.status(400).json({ message: "Invalid OTP. Please try again." });
+      return res.status(400).json({
+        message: "Invalid OTP. Please try again.",
+      });
     }
 
     req.session.isAuthenticated = true;
@@ -256,15 +295,60 @@ app.post("/verify-otp-login", async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// Route 6: Clear Session / Logout
+// Route 6: Standard Password Login
+// -------------------------------------------------------------
+app.post("/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    const result = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({ message: "User not found" });
+    }
+
+    const user = result.rows[0];
+    const checkPassword = await bcrypt.compare(password, user.password);
+
+    if (!checkPassword) {
+      return res.status(400).json({ message: "Wrong Password" });
+    }
+
+    req.session.isAuthenticated = true;
+
+    req.session.save((err) => {
+      if (err) console.error("Session Save Error:", err);
+      return res.json({ message: "Login Successful" });
+    });
+  } catch (error) {
+    console.error("Login Error:", error);
+    res.status(500).json({ message: "Server Error" });
+  }
+});
+
+// -------------------------------------------------------------
+// Route 7: Clear/Destroy Session API
 // -------------------------------------------------------------
 app.post("/clear-session", (req, res) => {
   req.session.destroy((err) => {
-    if (err) return res.status(500).json({ message: "Failed to destroy session" });
+    if (err) {
+      return res.status(500).json({ message: "Failed to destroy session" });
+    }
     res.clearCookie("connect.sid");
     res.json({ message: "Session destroyed successfully" });
   });
 });
 
+// -------------------------------------------------------------
+// Route 8: Webhook Listener for SMS Status
+// -------------------------------------------------------------
+app.post("/combirds/sms-status", (req, res) => {
+  const { message_id, status, statusDescription } = req.body;
+  console.log(`[SMS WEBHOOK STATUS] ${message_id} -> ${status} (${statusDescription})`);
+  res.status(200).send("OK");
+});
+
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
