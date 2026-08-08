@@ -120,9 +120,11 @@ app.post("/send-otp", async (req, res) => {
       return res.status(400).json({ message: "All fields are required" });
     }
 
+    const cleanMobile = mobile.replace(/\D/g, "");
+
     const checkUser = await pool.query(
       "SELECT id FROM users WHERE email=$1 OR mobile=$2",
-      [email, mobile]
+      [email, cleanMobile]
     );
 
     if (checkUser.rows.length > 0) {
@@ -133,7 +135,6 @@ app.post("/send-otp", async (req, res) => {
 
     const hashPassword = await bcrypt.hash(password, 10);
     const generatedOtp = Math.floor(100000 + Math.random() * 900000).toString();
-    const cleanMobile = mobile.replace(/\D/g, "");
 
     await sendSmsNotification(cleanMobile, generatedOtp);
 
@@ -200,7 +201,34 @@ app.post("/register", async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// Route 3: Live Mobile Check API
+// Route 3: Combined Live User Check API (Email & Mobile)
+// -------------------------------------------------------------
+app.post("/check-user", async (req, res) => {
+  try {
+    const { email, mobile } = req.body;
+    let emailExists = false;
+    let mobileExists = false;
+
+    if (email) {
+      const emailRes = await pool.query("SELECT id FROM users WHERE email=$1", [email]);
+      emailExists = emailRes.rows.length > 0;
+    }
+
+    if (mobile) {
+      const cleanMobile = mobile.replace(/\D/g, "");
+      const mobileRes = await pool.query("SELECT id FROM users WHERE mobile=$1", [cleanMobile]);
+      mobileExists = mobileRes.rows.length > 0;
+    }
+
+    return res.json({ emailExists, mobileExists });
+  } catch (error) {
+    console.error("Check User Error:", error);
+    res.status(500).json({ emailExists: false, mobileExists: false, message: "Server Error" });
+  }
+});
+
+// -------------------------------------------------------------
+// Route 4: Live Mobile Check API
 // -------------------------------------------------------------
 app.post("/check-mobile", async (req, res) => {
   try {
@@ -224,7 +252,7 @@ app.post("/check-mobile", async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// Route 4: Send OTP for Login
+// Route 5: Send OTP for Login
 // -------------------------------------------------------------
 app.post("/send-otp-login", async (req, res) => {
   try {
@@ -262,7 +290,7 @@ app.post("/send-otp-login", async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// Route 5: Verify Login OTP
+// Route 6: Verify Login OTP
 // -------------------------------------------------------------
 app.post("/verify-otp-login", async (req, res) => {
   try {
@@ -295,7 +323,7 @@ app.post("/verify-otp-login", async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// Route 6: Standard Password Login
+// Route 7: Standard Password Login
 // -------------------------------------------------------------
 app.post("/login", async (req, res) => {
   try {
@@ -327,7 +355,7 @@ app.post("/login", async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// Route 7: Clear/Destroy Session API
+// Route 8: Clear/Destroy Session API
 // -------------------------------------------------------------
 app.post("/clear-session", (req, res) => {
   req.session.destroy((err) => {
@@ -340,7 +368,7 @@ app.post("/clear-session", (req, res) => {
 });
 
 // -------------------------------------------------------------
-// Route 8: Webhook Listener for SMS Status
+// Route 9: Webhook Listener for SMS Status
 // -------------------------------------------------------------
 app.post("/combirds/sms-status", (req, res) => {
   const { message_id, status, statusDescription } = req.body;
