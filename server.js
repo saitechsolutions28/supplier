@@ -12,7 +12,7 @@ const app = express();
 // 1. CORS Configuration
 app.use(
   cors({
-    origin: ["http://localhost:5173", "http://localhost:3000", "https://achudhaloans.in"],
+    origin: ["http://localhost:5173", "http://localhost:3000", "https://achudhaloans.in"], // Added port 3000 as fallback
     credentials: true,
   })
 );
@@ -24,12 +24,11 @@ app.use(
   session({
     secret: process.env.SESSION_SECRET || "achudha_matrimony_secret_key",
     resave: false,
-    saveUninitialized: false, // Changed to false to prevent race conditions with new sessions
+    saveUninitialized: true,
     cookie: {
-      secure: process.env.NODE_ENV === "production", // 'true' only if using HTTPS in production
+      secure: false, // Set to true for HTTPS in production
       httpOnly: true,
-      sameSite: "lax",
-      maxAge: 10 * 60 * 1000, // 10 minutes duration
+      maxAge: 10 * 60 * 1000, // Session expires in 10 minutes
     },
   })
 );
@@ -133,7 +132,7 @@ app.post("/send-otp", async (req, res) => {
       }
 
       res.json({
-        message: `OTP sent successfully to ${cleanMobile}`,
+       // message: `OTP sent successfully to ${cleanMobile}`,
       });
     });
   } catch (error) {
@@ -155,8 +154,7 @@ app.post("/register", async (req, res) => {
       });
     }
 
-    // Cast both to String to avoid type mismatch bugs
-    if (String(req.session.otp) !== String(otp)) {
+    if (req.session.otp !== otp) {
       return res.status(400).json({
         message: "Invalid OTP. Please try again.",
       });
@@ -211,13 +209,7 @@ app.post("/login", async (req, res) => {
 
     req.session.isAuthenticated = true;
 
-    req.session.save((err) => {
-      if (err) {
-        console.error("Session Save Error:", err);
-        return res.status(500).json({ message: "Failed to save session." });
-      }
-      res.json({ message: "Login Successful" });
-    });
+    res.json({ message: "Login Successful" });
   } catch (error) {
     console.error("Login Error:", error);
     res.status(500).json({ message: "Server Error" });
@@ -225,7 +217,7 @@ app.post("/login", async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// Route 4: Check if Mobile Number is Registered (Live Check)
+// NEW Route 4: Check if Mobile Number is Registered (Live Check)
 // -------------------------------------------------------------
 app.post("/check-mobile", async (req, res) => {
   try {
@@ -249,7 +241,7 @@ app.post("/check-mobile", async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// Route 5: Send OTP for Login
+// NEW Route 5: Send OTP for Login
 // -------------------------------------------------------------
 app.post("/send-otp-login", async (req, res) => {
   try {
@@ -291,7 +283,7 @@ app.post("/send-otp-login", async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// Route 6: Verify Login OTP
+// NEW Route 6: Verify Login OTP
 // -------------------------------------------------------------
 app.post("/verify-otp-login", async (req, res) => {
   try {
@@ -303,8 +295,7 @@ app.post("/verify-otp-login", async (req, res) => {
       });
     }
 
-    // Cast both values to String to avoid type comparison issues
-    if (String(req.session.loginOtp) !== String(otp)) {
+    if (req.session.loginOtp !== otp) {
       return res.status(400).json({
         message: "Invalid OTP. Please try again.",
       });
